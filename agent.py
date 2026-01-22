@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import pandas as pd
+import requests
 from dotenv import load_dotenv
 
 try:
@@ -20,7 +21,6 @@ except ImportError as exc:
 
 
 SALES_REQUIRED_COLUMNS = {
-    "sale_id",
     "product_id",
     "sale_date",
     "quantity_sold",
@@ -28,6 +28,7 @@ SALES_REQUIRED_COLUMNS = {
     "region",
     "sales_channel",
 }
+SALES_ID_COLUMNS = {"sale_id", "id"}
 INVENTORY_REQUIRED_COLUMNS = {
     "product_id",
     "product_name",
@@ -50,16 +51,36 @@ SYSTEM_PROMPT = (
 
 
 class DataStore:
-    def __init__(self, sales_path: Path, inventory_path: Path) -> None:
+    def __init__(
+        self,
+        sales_path: Path,
+        inventory_path: Path,
+        supabase_url: Optional[str] = None,
+        supabase_key: Optional[str] = None,
+        supabase_schema: Optional[str] = None,
+        sales_table: str = "sales",
+        inventory_table: str = "inventory",
+        page_size: int = 1000,
+    ) -> None:
         self.sales_path = sales_path
         self.inventory_path = inventory_path
+        self.supabase_url = supabase_url
+        self.supabase_key = supabase_key
+        self.supabase_schema = supabase_schema
+        self.sales_table = sales_table
+        self.inventory_table = inventory_table
+        self.page_size = page_size
         self.sales: Optional[pd.DataFrame] = None
         self.inventory: Optional[pd.DataFrame] = None
 
     def load_data(self) -> tuple[pd.DataFrame, pd.DataFrame]:
         if self.sales is None or self.inventory is None:
-            sales = pd.read_csv(self.sales_path)
-            inventory = pd.read_csv(self.inventory_path)
+            if self._use_supabase():
+                sales = self._load_supabase_table(self.sales_table)
+                inventory = self._load_supabase_table(self.inventory_table)
+            else:
+                sales = pd.read_csv(self.sales_path)
+                inventory = pd.read_csv(self.inventory_path)
             self._validate_columns(sales, inventory)
             self.sales = self._normalize_sales(sales)
             self.inventory = self._normalize_inventory(inventory)
@@ -95,6 +116,11 @@ class DataStore:
         inventory_missing = INVENTORY_REQUIRED_COLUMNS.difference(inventory.columns)
         if sales_missing:
             raise ValueError(f"Sales data missing columns: {sorted(sales_missing)}")
+        if not any(col in sales.columns for col in SALES_ID_COLUMNS):
+            raise ValueError(
+                "Sales data missing identifier column: expected one of "
+                f"{sorted(SALES_ID_COLUMNS)}"
+            )
         if inventory_missing:
             raise ValueError(f"Inventory data missing columns: {sorted(inventory_missing)}")
 
@@ -115,6 +141,35 @@ class DataStore:
             inventory["reorder_level"], errors="coerce"
         )
         return inventory
+
+    def _use_supabase(self) -> bool:
+        return bool(self.supabase_url and self.supabase_key)
+
+    def _load_supabase_table(self, table: str) -> pd.DataFrame:
+        rows: list[dict[str, Any]] = []
+        start = 0
+        base_url = self.supabase_url.rstrip("/")
+        url = f"{base_url}/rest/v1/{table}"
+        headers = {
+            "apikey": self.supabase_key,
+            "Authorization": f"Bearer {self.supabase_key}",
+        }
+        if self.supabase_schema:
+            headers["Accept-Profile"] = self.supabase_schema
+
+        while True:
+            params = {"select": "*", "limit": self.page_size, "offset": start}
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            if response.status_code >= 300:
+                raise ValueError(
+                    f"Supabase error {response.status_code}: {response.text}"
+                )
+            batch = response.json() or []
+            rows.extend(batch)
+            if len(batch) < self.page_size:
+                break
+            start += self.page_size
+        return pd.DataFrame(rows)
 
 
 class BusinessAnalystTools:
@@ -533,7 +588,23 @@ def main() -> None:
     if not api_key:
         raise SystemExit("GEMINI_API_KEY is missing. Set it in a .env file.")
 
-    datastore = DataStore(args.sales, args.inventory)
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_KEY")
+    supabase_schema = os.getenv("SUPABASE_SCHEMA")
+    sales_table = os.getenv("SUPABASE_SALES_TABLE", "sales")
+    inventory_table = os.getenv("SUPABASE_INVENTORY_TABLE", "inventory")
+    page_size = int(os.getenv("SUPABASE_PAGE_SIZE", "1000"))
+
+    datastore = DataStore(
+        args.sales,
+        args.inventory,
+        supabase_url=supabase_url,
+        supabase_key=supabase_key,
+        supabase_schema=supabase_schema,
+        sales_table=sales_table,
+        inventory_table=inventory_table,
+        page_size=page_size,
+    )
     tools = BusinessAnalystTools(datastore)
     agent = GeminiAgent(tools, api_key=api_key, model=args.model)
 

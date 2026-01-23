@@ -15,12 +15,15 @@ Create a `.env` file with your API key and (optional) Supabase credentials:
 
 ```bash
 GEMINI_API_KEY=your_api_key_here
+GEMINI_EMBED_MODEL=text-embedding-004
 SUPABASE_URL=your_supabase_url
 SUPABASE_KEY=your_supabase_key
 SUPABASE_SCHEMA=public
 SUPABASE_SALES_TABLE=sales
 SUPABASE_INVENTORY_TABLE=inventory
 SUPABASE_PAGE_SIZE=1000
+SUPABASE_DOCS_TABLE=documents
+SUPABASE_RPC_MATCH=match_documents
 ```
 
 Install dependencies:
@@ -50,6 +53,20 @@ python agent.py --question "Top 3 products by revenue from 2024-01-01 to 2024-03
 - Inventory questions can filter by warehouse, category, or supplier.
 - You can change models with `--model gemini-2.5-flash`.
 - If Supabase env vars are present, the agent reads data from Supabase via REST; otherwise it falls back to local CSVs.
+- For RAG, create the pgvector table and RPC (see `docs/rag_setup.sql`), then ingest PDFs with `scripts/ingest_pdfs.py`.
+
+## RAG Setup (Supabase pgvector)
+
+1) Run `docs/rag_setup.sql` in Supabase SQL editor.
+   - Gemini text-embedding-004 uses 768 dimensions (`vector(768)`).
+2) Put PDFs in `docs/`.
+3) Ingest:
+
+```bash
+python scripts/ingest_pdfs.py --docs-dir docs --replace
+```
+
+This will embed and store chunks in `SUPABASE_DOCS_TABLE`.
 
 ## Example questions
 
